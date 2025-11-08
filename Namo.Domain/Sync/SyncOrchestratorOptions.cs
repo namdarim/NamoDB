@@ -1,4 +1,4 @@
-namespace Namo.Infrastructure.Orchestrator;
+namespace Namo.Domain.Sync;
 
 public sealed class SyncOrchestratorOptions
 {

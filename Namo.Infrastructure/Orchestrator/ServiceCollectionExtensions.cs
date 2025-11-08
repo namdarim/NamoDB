@@ -1,6 +1,8 @@
 using Microsoft.Extensions.DependencyInjection;
-using Namo.Domain.Contracts.Cloud;
+using Namo.Domain.Contracts.Env;
 using Namo.Domain.Contracts.Sync;
+using Namo.Domain.Sync;
+using Namo.Infrastructure.Platform;
 using Namo.Infrastructure.Sync.Apply;
 using Namo.Infrastructure.Sync.Snapshot;
 
@@ -12,6 +14,7 @@ public static class ServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
 
+        services.AddSingleton<IFileSystemAdapter, OperatingSystemFileSystemAdapter>();
         services.AddSingleton<ISqliteSnapshotCreator, SqliteVacuumSnapshotCreator>();
         services.AddSingleton<ISnapshotDownloader, VersionedSnapshotDownloader>();
         services.AddSingleton<ISqliteSnapshotApplier, SqliteSnapshotApplier>();
