@@ -12,11 +12,7 @@ public static class UsageExamples
     public static async Task PublishAndSyncWithMauiAdaptersAsync(string liveDatabasePath, string snapshotTempPath, CancellationToken cancellationToken)
     {
         var services = new ServiceCollection();
-        services.AddMauiSnapshotSync(options =>
-        {
-            options.ServiceUrl = "https://s3-compatible.example";
-            options.ForcePathStyle = true;
-        });
+        services.AddMauiSnapshotSync();
 
         await RunPublishAndSyncAsync(services, liveDatabasePath, snapshotTempPath, cancellationToken).ConfigureAwait(false);
     }
@@ -24,11 +20,7 @@ public static class UsageExamples
     public static async Task PublishAndSyncWithWindowsAdaptersAsync(string liveDatabasePath, string snapshotTempPath, CancellationToken cancellationToken)
     {
         var services = new ServiceCollection();
-        services.AddWindowsSnapshotSync(options =>
-        {
-            options.ServiceUrl = "https://s3-compatible.example";
-            options.ForcePathStyle = true;
-        });
+        services.AddWindowsSnapshotSync();
 
         await RunPublishAndSyncAsync(services, liveDatabasePath, snapshotTempPath, cancellationToken).ConfigureAwait(false);
     }
