@@ -28,7 +28,7 @@ public sealed class S3VersionedObjectClient : IVersionedObjectClient
 
         var response = await _s3.ListVersionsAsync(request, cancellationToken).ConfigureAwait(false);
         var version = response.Versions
-            .Where(v => v.Key == identifier.ObjectKey && !v.IsDeleteMarker)
+            .Where(v => v.Key == identifier.ObjectKey && v.IsDeleteMarker != true)
             .OrderByDescending(v => v.LastModified)
             .FirstOrDefault();
 
@@ -41,8 +41,8 @@ public sealed class S3VersionedObjectClient : IVersionedObjectClient
             version.VersionId,
             version.ETag?.Trim('"') ?? string.Empty,
             await ResolveSha256Async(identifier, version.VersionId, cancellationToken).ConfigureAwait(false),
-            version.LastModified.ToUniversalTime(),
-            version.Size);
+            version.LastModified?.ToUniversalTime(),
+            version.Size!.Value);
     }
 
     public async Task<VersionedUploadResult> UploadSnapshotAsync(CloudObjectIdentifier identifier, Stream content, string sha256Hex, DateTimeOffset createdAtUtc, CancellationToken cancellationToken)
@@ -100,7 +100,7 @@ public sealed class S3VersionedObjectClient : IVersionedObjectClient
             response.VersionId!,
             response.ETag?.Trim('"') ?? string.Empty,
             sha256,
-            response.LastModified.ToUniversalTime(),
+            response.LastModified?.ToUniversalTime(),
             response.ContentLength);
 
         return new VersionedDownloadResult(metadata, new DownloadStreamWrapper(response));
@@ -126,7 +126,7 @@ public sealed class S3VersionedObjectClient : IVersionedObjectClient
             versionId,
             response.ETag?.Trim('"') ?? string.Empty,
             sha256,
-            response.LastModified.ToUniversalTime(),
+            response.LastModified?.ToUniversalTime(),
             response.ContentLength);
     }
 

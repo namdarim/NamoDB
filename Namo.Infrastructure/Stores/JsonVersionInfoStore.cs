@@ -48,7 +48,7 @@ public sealed class JsonVersionInfoStore : IVersionInfoStore
             ETag = info.Metadata.ETag,
             Sha256 = info.Metadata.Sha256,
             ContentLength = info.Metadata.ContentLength,
-            LastModifiedUtc = info.Metadata.LastModifiedUtc,
+            LastModifiedUtc = info.Metadata.LastModifiedUtc!.Value,
             AppliedAtUtc = info.AppliedAtUtc
         };
 

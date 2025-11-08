@@ -1,3 +1,4 @@
+/*
 using Microsoft.Extensions.DependencyInjection;
 using Namo.Domain.Contracts.Cloud;
 using Namo.Domain.Contracts.Sync;
@@ -43,3 +44,4 @@ public static class UsageExamples
         await orchestrator.SyncAsync(liveDatabasePath, snapshotTempPath, identifier, cancellationToken).ConfigureAwait(false);
     }
 }
+*/
