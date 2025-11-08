@@ -15,6 +15,10 @@ public sealed class S3VersionedObjectClient : IVersionedObjectClient
         _s3 = s3 ?? throw new ArgumentNullException(nameof(s3));
     }
 
+    /// <summary>
+    /// Retrieves metadata for the newest downloadable version of the specified object. AWS returns versions newest-first,
+    /// so we iterate pages until the first non-delete entry for the key, and callers must download using the returned VersionId to remain TOCTOU-safe.
+    /// </summary>
     public async Task<VersionedObjectMetadata?> GetLatestVersionAsync(CloudObjectIdentifier identifier, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(identifier);
@@ -22,15 +26,42 @@ public sealed class S3VersionedObjectClient : IVersionedObjectClient
         var request = new ListVersionsRequest
         {
             BucketName = identifier.BucketName,
-            Prefix = identifier.ObjectKey,
-            MaxKeys = 1
+            Prefix = identifier.ObjectKey
         };
 
-        var response = await _s3.ListVersionsAsync(request, cancellationToken).ConfigureAwait(false);
-        var version = response.Versions
-            .Where(v => v.Key == identifier.ObjectKey && !v.IsDeleteMarker)
-            .OrderByDescending(v => v.LastModified)
-            .FirstOrDefault();
+        S3ObjectVersion? version = null;
+        ListVersionsResponse response;
+        // AWS ListObjectVersions returns versions newest-first, so the first non-delete match is the latest downloadable version.
+        do
+        {
+            response = await _s3.ListVersionsAsync(request, cancellationToken).ConfigureAwait(false);
+
+            foreach (var candidate in response.Versions)
+            {
+                if (!string.Equals(candidate.Key, identifier.ObjectKey, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (candidate.IsDeleteMarker)
+                {
+                    continue;
+                }
+
+                version = candidate;
+                break;
+            }
+
+            if (version is not null)
+            {
+                break;
+            }
+
+            // Continue paging until we find the newest non-delete version for the target key.
+            request.KeyMarker = response.NextKeyMarker;
+            request.VersionIdMarker = response.NextVersionIdMarker;
+        }
+        while (response.IsTruncated);
 
         if (version is null)
         {
