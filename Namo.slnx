@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="MAUI/MAUI.csproj" />
+  <Project Path="Namo.Domain/Namo.Domain.csproj" />
+  <Project Path="Namo.Infrastructure/Namo.Infrastructure.csproj" />
+  <Project Path="WIN/WIN.csproj" />
+</Solution>

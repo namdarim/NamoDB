@@ -28,7 +28,7 @@ public static class ServiceCollectionExtensions
         });
 
         services.Configure<SyncOrchestratorOptions>(_ => { });
-        services.AddVersionedS3Client(configureS3);
+        services.AddVersionedS3Client();
         services.AddSnapshotSyncCore();
 
         return services;
