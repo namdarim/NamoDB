@@ -34,29 +34,43 @@ public sealed class VersionedSnapshotDownloader : ISnapshotDownloader
 
         try
         {
-            await using var download = await _client.DownloadVersionAsync(identifier, metadata.VersionId, cancellationToken).ConfigureAwait(false);
-            if (!string.Equals(download.Metadata.VersionId, metadata.VersionId, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException("Downloaded version identifier mismatch.");
-            }
-
-            var effectiveMetadata = download.Metadata;
-            await using var responseStream = download.ContentStream;
-            await using var fileStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, BufferSize, useAsync: true);
-            using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            var buffer = new byte[BufferSize];
-            int bytesRead;
+            VersionedObjectMetadata? effectiveMetadata = null;
+            string sha256Hex = string.Empty;
             long totalBytes = 0;
-            while ((bytesRead = await responseStream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken).ConfigureAwait(false)) > 0)
-            {
-                await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken).ConfigureAwait(false);
-                hasher.AppendData(buffer, 0, bytesRead);
-                totalBytes += bytesRead;
-            }
-            await fileStream.FlushAsync(cancellationToken).ConfigureAwait(false);
 
-            var hash = hasher.GetHashAndReset();
-            var sha256Hex = Convert.ToHexString(hash);
+            await using (var download = await _client.DownloadVersionAsync(identifier, metadata.VersionId, cancellationToken).ConfigureAwait(false))
+            {
+                if (!string.Equals(download.Metadata.VersionId, metadata.VersionId, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("Downloaded version identifier mismatch.");
+                }
+
+                effectiveMetadata = download.Metadata;
+
+                await using var responseStream = download.ContentStream;
+                using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                await using (var fileStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, BufferSize, useAsync: true))
+                {
+                    var buffer = new byte[BufferSize];
+                    int bytesRead;
+                    totalBytes = 0;
+                    while ((bytesRead = await responseStream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken).ConfigureAwait(false)) > 0)
+                    {
+                        await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken).ConfigureAwait(false);
+                        hasher.AppendData(buffer, 0, bytesRead);
+                        totalBytes += bytesRead;
+                    }
+
+                    await fileStream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    sha256Hex = Convert.ToHexString(hasher.GetHashAndReset());
+                }
+            }
+
+            if (effectiveMetadata is null)
+            {
+                throw new InvalidOperationException("Failed to resolve downloaded metadata.");
+            }
+
             if (!sha256Hex.Equals(effectiveMetadata.Sha256, StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidOperationException("Downloaded snapshot failed SHA-256 verification.");
