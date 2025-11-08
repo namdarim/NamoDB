@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Namo.Domain.Contracts.Env;
 using Namo.Domain.Contracts.Sync;
+using Namo.Domain.Sync;
 using Namo.Infrastructure.Cloud.S3;
 using Namo.Infrastructure.Orchestrator;
 using Namo.Infrastructure.Stores;

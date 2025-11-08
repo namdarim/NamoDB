@@ -1,10 +1,9 @@
-using System.IO;
 using Microsoft.Extensions.Options;
 using Namo.Domain.Contracts.Cloud;
+using Namo.Domain.Contracts.Env;
 using Namo.Domain.Contracts.Sync;
-using Namo.Infrastructure.Sync.Apply;
 
-namespace Namo.Infrastructure.Orchestrator;
+namespace Namo.Domain.Sync;
 
 public sealed class VersionedSyncOrchestrator : ISyncOrchestrator
 {
@@ -13,6 +12,7 @@ public sealed class VersionedSyncOrchestrator : ISyncOrchestrator
     private readonly ISnapshotDownloader _snapshotDownloader;
     private readonly ISqliteSnapshotApplier _snapshotApplier;
     private readonly IVersionInfoStore _versionInfoStore;
+    private readonly IFileSystemAdapter _fileSystem;
     private readonly SyncOrchestratorOptions _options;
 
     public VersionedSyncOrchestrator(
@@ -21,6 +21,7 @@ public sealed class VersionedSyncOrchestrator : ISyncOrchestrator
         ISnapshotDownloader snapshotDownloader,
         ISqliteSnapshotApplier snapshotApplier,
         IVersionInfoStore versionInfoStore,
+        IFileSystemAdapter fileSystem,
         IOptions<SyncOrchestratorOptions> options)
     {
         _snapshotCreator = snapshotCreator ?? throw new ArgumentNullException(nameof(snapshotCreator));
@@ -28,6 +29,7 @@ public sealed class VersionedSyncOrchestrator : ISyncOrchestrator
         _snapshotDownloader = snapshotDownloader ?? throw new ArgumentNullException(nameof(snapshotDownloader));
         _snapshotApplier = snapshotApplier ?? throw new ArgumentNullException(nameof(snapshotApplier));
         _versionInfoStore = versionInfoStore ?? throw new ArgumentNullException(nameof(versionInfoStore));
+        _fileSystem = fileSystem ?? throw new ArgumentNullException(nameof(fileSystem));
         _options = options?.Value ?? new SyncOrchestratorOptions();
     }
 
@@ -36,21 +38,18 @@ public sealed class VersionedSyncOrchestrator : ISyncOrchestrator
         ArgumentException.ThrowIfNullOrEmpty(liveDatabasePath);
         ArgumentNullException.ThrowIfNull(identifier);
 
-        var temporarySnapshotPath = Path.Combine(Path.GetTempPath(), $"snapshot-{Guid.NewGuid():N}.db");
+        var temporarySnapshotPath = _fileSystem.CreateTemporaryFilePath("snapshot", ".db");
         try
         {
             var snapshot = await _snapshotCreator.CreateSnapshotAsync(liveDatabasePath, temporarySnapshotPath, cancellationToken).ConfigureAwait(false);
-            await using var stream = new FileStream(snapshot.SnapshotPath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, useAsync: true);
+            await using var stream = await _fileSystem.OpenReadAsync(snapshot.SnapshotPath, cancellationToken).ConfigureAwait(false);
             var createdAtUtc = DateTimeOffset.UtcNow;
             var result = await _objectClient.UploadSnapshotAsync(identifier, stream, snapshot.Sha256Hex, createdAtUtc, cancellationToken).ConfigureAwait(false);
             return result;
         }
         finally
         {
-            if (File.Exists(temporarySnapshotPath))
-            {
-                File.Delete(temporarySnapshotPath);
-            }
+            await _fileSystem.DeleteFileIfExistsAsync(temporarySnapshotPath, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -91,10 +90,7 @@ public sealed class VersionedSyncOrchestrator : ISyncOrchestrator
         }
         finally
         {
-            if (File.Exists(snapshotTempPath))
-            {
-                File.Delete(snapshotTempPath);
-            }
+            await _fileSystem.DeleteFileIfExistsAsync(snapshotTempPath, cancellationToken).ConfigureAwait(false);
         }
     }
 }
