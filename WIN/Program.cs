@@ -1,4 +1,4 @@
-namespace WIN
+namespace Namo.WIN
 {
     internal static class Program
     {
