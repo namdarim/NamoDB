@@ -24,57 +24,27 @@ public sealed class S3StorageService : IDisposable
     {
         var req = new ListVersionsRequest { BucketName = bucket, Prefix = key };
 
+        ListVersionsResponse resp;
         do
         {
-            var resp = await _s3.ListVersionsAsync(req, ct).ConfigureAwait(false);
+            resp = await _s3.ListVersionsAsync(req, ct).ConfigureAwait(false);
+
             var tip = resp.Versions?.FirstOrDefault(v => v.Key == key && v.IsLatest == true);
             if (tip != null)
             {
-                if (tip.IsDeleteMarker == true) throw new DeletedObjectException("object has a delete-marker on top.");
+                if (tip.IsDeleteMarker == true)
+                    throw new DeletedObjectException("Object has a delete marker at the top.");
 
-                var head = await _s3.GetObjectMetadataAsync(new GetObjectMetadataRequest
-                {
-                    BucketName = bucket,
-                    Key = key,
-                    VersionId = tip.VersionId
-                }, ct).ConfigureAwait(false);
-
-                var etag = (head.ETag ?? string.Empty).Trim('"');
-                var len = head.ContentLength;
-                var lm = head.LastModified?.ToUniversalTime() ?? tip.LastModified?.ToUniversalTime() ?? DateTime.UtcNow;
-
-                var vid = tip.VersionId ?? throw new InvalidOperationException("missing VersionId");
-                return new ObjectVersionInfo(vid, etag, len, new DateTimeOffset(lm, TimeSpan.Zero));
+                return await GetObjectVersionInfo(bucket, key, tip.VersionId ?? throw new InvalidOperationException("Missing VersionId"), ct)
+                    .ConfigureAwait(false);
             }
 
             req.KeyMarker = resp.NextKeyMarker;
             req.VersionIdMarker = resp.NextVersionIdMarker;
 
-        } while (!string.IsNullOrEmpty(req.KeyMarker) || !string.IsNullOrEmpty(req.VersionIdMarker));
+        } while (resp.IsTruncated == true);
 
-        throw new NoRemoteVersionException($"no versions for {bucket}/{key}");
-    }
-
-    public async Task<int?> GetVersionRankAsync(string bucket, string key, string versionId, CancellationToken ct = default)
-    {
-        var req = new ListVersionsRequest { BucketName = bucket, Prefix = key };
-        var rank = 0;
-        do
-        {
-            var resp = await _s3.ListVersionsAsync(req, ct).ConfigureAwait(false);
-            if (resp.Versions == null) break;
-            foreach (var v in resp.Versions.Where(v => v.Key == key))
-            {
-                if (v.IsDeleteMarker == true) continue;
-                if (v.VersionId == versionId) return rank;
-                rank++;
-            }
-            req.KeyMarker = resp.NextKeyMarker;
-            req.VersionIdMarker = resp.NextVersionIdMarker;
-        }
-        while (!string.IsNullOrEmpty(req.KeyMarker) || !string.IsNullOrEmpty(req.VersionIdMarker));
-
-        return null;
+        throw new NoRemoteVersionException($"No versions for {bucket}/{key}");
     }
 
     /// <summary>Fetch the exact object version and write it to the given file path (no replace, no backup).</summary>
@@ -100,33 +70,47 @@ public sealed class S3StorageService : IDisposable
         {
             BucketName = bucket,
             Key = key,
-            FilePath = filePath
+            FilePath = filePath,
+            ChecksumSHA256 = FileHash.Sha256OfFile(filePath)
         }, ct).ConfigureAwait(false);
 
-        var versionId = resp.VersionId;
-        if (string.IsNullOrEmpty(versionId))
-            throw new InvalidOperationException();
+        return await GetObjectVersionInfo(
+            bucket,
+            key,
+            resp.VersionId ?? throw new InvalidOperationException("Missing VersionId"),
+            ct
+        ).ConfigureAwait(false);
+    }
 
-        var head = await _s3.GetObjectMetadataAsync(new GetObjectMetadataRequest
+    private async Task<ObjectVersionInfo> GetObjectVersionInfo(string bucket, string key, string versionId, CancellationToken ct = default)
+    {
+        var response = await _s3.GetObjectMetadataAsync(new GetObjectMetadataRequest
         {
             BucketName = bucket,
             Key = key,
             VersionId = versionId
         }, ct).ConfigureAwait(false);
 
-        var etag = (head.ETag ?? string.Empty).Trim('"');
-        var len = head.ContentLength;
-        var lm = head.LastModified?.ToUniversalTime() ?? DateTime.UtcNow;
-
-        return new ObjectVersionInfo(versionId, etag, len, new DateTimeOffset(lm, TimeSpan.Zero));
+        return new ObjectVersionInfo(
+            VersionId: response.VersionId,
+            ETag: response.ETag,
+            ChecksumSHA256: response.ChecksumSHA256,
+            ContentLength: response.ContentLength,
+            LastModifiedUtc: response.LastModified?.ToUniversalTime()
+                ?? throw new InvalidOperationException("LastModified should not be null.")
+        );
     }
 
-    public void Dispose() { if (_s3 is IDisposable d) d.Dispose(); }
+    public void Dispose()
+    {
+        if (_s3 is IDisposable d) d.Dispose();
+    }
 }
 
 public readonly record struct ObjectVersionInfo(
     string VersionId,
     string ETag,
+    string ChecksumSHA256,
     long ContentLength,
     DateTimeOffset LastModifiedUtc
 );
