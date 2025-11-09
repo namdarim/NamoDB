@@ -40,16 +40,19 @@ public static class SqliteBackup
             // Take a consistent snapshot at the time of calling.
             src.BackupDatabase(dst);
 
-            if (verifyIntegrity)
-            {
-                using var cmd = dst.CreateCommand();
-                cmd.CommandText = "PRAGMA integrity_check;";
-                var result = (string)cmd.ExecuteScalar()!;
-                if (!string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidOperationException($"SQLite integrity_check failed with result: {result}");
-            }
-        }
 
+        }
+        if (verifyIntegrity)
+        {
+            using var chk = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = destPath, Mode = SqliteOpenMode.ReadOnly }.ConnectionString);
+            chk.Open();
+            using var cmd = chk.CreateCommand();
+            cmd.CommandText = "PRAGMA integrity_check;";
+            var result = (string)cmd.ExecuteScalar()!;
+            if (!string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"SQLite integrity_check failed with result: {result}");
+        }
         return destPath;
     }
+
 }

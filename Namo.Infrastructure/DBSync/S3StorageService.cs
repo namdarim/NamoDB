@@ -93,15 +93,51 @@ public sealed class S3StorageService : IDisposable
         await resp.ResponseStream.CopyToAsync(fs, ct).ConfigureAwait(false);
     }
 
+    // inside S3StorageService
+    private static FileStream OpenReadWithRetry(string path, int retries = 8, int delayMs = 120)
+    {
+        for (int i = 0; ; i++)
+        {
+            try
+            {
+                return new FileStream(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete, // tolerate indexers/scanners
+                    bufferSize: 128 * 1024,
+                    options: FileOptions.SequentialScan);
+            }
+            catch (IOException) when (i < retries)
+            {
+                Thread.Sleep(delayMs);
+                continue;
+            }
+        }
+    }
+
+
     /// <summary>Upload a local file as the next version for the key; return its version metadata.</summary>
     public async Task<ObjectVersionInfo> UploadObjectAsync(string bucket, string key, string filePath, CancellationToken ct = default)
     {
-        var resp = await _s3.PutObjectAsync(new PutObjectRequest
+        await using var fs = OpenReadWithRetry(filePath);
+
+        var put = new PutObjectRequest
         {
             BucketName = bucket,
             Key = key,
-            FilePath = filePath
-        }, ct).ConfigureAwait(false);
+            InputStream = fs,
+            AutoCloseStream = false // we control disposal with await using
+        };
+
+        var resp = await _s3.PutObjectAsync(put, ct).ConfigureAwait(false);
+
+        //var resp = await _s3.PutObjectAsync(new PutObjectRequest
+        //{
+        //    BucketName = bucket,
+        //    Key = key,
+        //    FilePath = filePath
+        //}, ct).ConfigureAwait(false);
 
         var versionId = resp.VersionId;
         if (string.IsNullOrEmpty(versionId))

@@ -168,6 +168,14 @@ public sealed class SyncOrchestrator
     {
         try
         {
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+            {
+                var message = string.IsNullOrWhiteSpace(filePath)
+                    ? "File path is empty."
+                    : $"File not found: {filePath}";
+                return new SyncResult(SyncAction.Push, SyncOutcome.Failed, force, Message: message);
+            }
+
             var manifest = await _manifestStore.LoadAsync(ct).ConfigureAwait(false)
                           ?? new DbSyncManifest { Bucket = _settings.Bucket, Key = _settings.Key, VersionId = string.Empty };
 
@@ -225,6 +233,13 @@ public sealed class SyncOrchestrator
     {
         try
         {
+            if (string.IsNullOrWhiteSpace(liveDbPath) || !File.Exists(liveDbPath))
+            {
+                var message = string.IsNullOrWhiteSpace(liveDbPath)
+                    ? "Db path is empty."
+                    : $"Db not found: {liveDbPath}";
+                return new SyncResult(SyncAction.Push, SyncOutcome.Failed, force, Message: message);
+            }
             var snapshotPath = SqliteBackup.CreateSnapshot(liveDbPath, snapshotsDir, snapshotFileName: null, verifyIntegrity: false);
             try
             {
