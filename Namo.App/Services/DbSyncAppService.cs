@@ -29,15 +29,10 @@ public sealed class DbSyncAppService
 
     public async Task<DbSyncResult> PushAsync(bool force = false, CancellationToken ct = default)
     {
-        var r = await _sync.PushFromDatabaseAsync(_paths.LocalDbPath, _paths.SnapshotDir, force, ct);
+        var r = await _sync.PushAsync(_paths.LocalDbPath, _paths.SnapshotDir, force, ct);
         return MapToAppResult(r);
     }
 
-    public async Task<DbSyncResult> PushFromFileAsync(string snapshotPath, bool force = false, CancellationToken ct = default)
-    {
-        var r = await _sync.PushFromFileAsync(snapshotPath, force, ct);
-        return MapToAppResult(r);
-    }
 
     private static DbSyncResult MapToAppResult(SyncResult r)
     {

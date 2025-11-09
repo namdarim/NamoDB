@@ -2,8 +2,7 @@
 
 public sealed record DbSyncManifest(
     DbSyncManifest.ServerStateInfo ServerState,
-    DateTimeOffset CreatedAtUtc,
-    DateTimeOffset LastConvergedUtc
+    DateTimeOffset CreatedAtUtc
 )
 {
     public sealed record ServerStateInfo(

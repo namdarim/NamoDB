@@ -12,13 +12,12 @@ public enum SyncAction
 public enum SyncOutcome
 {
     NoChange,                       // nothing to do (already in sync)
+    Created,                       // pull: local file created from remote
     Replaced,                       // pull: local file replaced from remote
     Published,                      // push: new remote version published
     Conflict_LocalChanged,          // local content changed since last apply (hash mismatch)
     Conflict_RemoteHeadMismatch,    // remote head != local manifest head
-    Conflict_RollbackRejected,      // discovered remote older than local policy allows
     RemoteDeleted,                  // remote object is deleted / has delete-marker / no versions
-    BackupAlreadyExists,            // selected backup path already exists; no overwrite performed
     Failed                          // unexpected error mapped by orchestrator
 }
 

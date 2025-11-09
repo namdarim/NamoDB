@@ -30,6 +30,7 @@ public sealed class SyncOrchestrator
     /// </summary>
     public async Task<SyncResult> PullAsync(
         string localDbPath,
+        string localDbBackupsDir,
         bool force = false,
         CancellationToken ct = default)
     {
@@ -37,7 +38,8 @@ public sealed class SyncOrchestrator
         {
             var localChanged = false;
             var manifest = await _manifestStore.LoadAsync(ct).ConfigureAwait(false);
-            if (File.Exists(localDbPath))
+            var localExists = File.Exists(localDbPath);
+            if (localExists)
             {
                 if (manifest == null || FileHash.Sha256OfFile(localDbPath) != manifest.ServerState.Sha256)
                     localChanged = true;
@@ -66,41 +68,15 @@ public sealed class SyncOrchestrator
                 return new SyncResult(SyncAction.Pull, SyncOutcome.NoChange, force);
 
             if (localChanged)
-
-            // Prepare backup if we will overwrite and backupNamer is provided
-            if (fileExists && backupNamer is not null &&
-                (localModified || !string.Equals(manifest.VersionId, latest.VersionId, StringComparison.Ordinal)))
             {
-                var ctxBackup = new BackupNamingContext
-                {
-                    LocalDbPath = localDbPath,
-                    LocalContentSha256 = localHashBefore,
-                    LocalVersionId = manifest.VersionId ?? string.Empty,
-                    RemoteVersionId = latest.VersionId,
-                    AppliedAtUtc = manifest.AppliedAtUtc,
-                    NowUtc = DateTimeOffset.UtcNow,
-                    Reason = "pull-overwrite"
-                };
-
-                var backupPath = backupNamer(ctxBackup);
-                if (string.IsNullOrWhiteSpace(backupPath))
-                    return new SyncResult(SyncAction.Pull, SyncOutcome.Failed, force, "Backup namer returned an empty path.");
-
-                if (File.Exists(backupPath))
-                {
-                    return new SyncResult(SyncAction.Pull, SyncOutcome.BackupAlreadyExists, force,
-                        Message: $"Backup already exists: {backupPath}",
-                        LocalBackupPath: backupPath,
-                        RemoteVersionIdBefore: latest.VersionId, LocalVersionIdBefore: manifest.VersionId,
-                        LocalHashBefore: localHashBefore);
-                }
-
-                Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!);
-                File.Copy(localDbPath, backupPath, overwrite: false);
+                var backupName = _backupNamer.GetName(new BackupNamingContext(RemoteVersionId: manifest?.ServerState.VersionId, Reason: "pull-overwrite"));
+                var backupPath = Path.Combine(localDbBackupsDir, backupName);
+                File.Copy(localDbPath, backupPath, overwrite: true);
             }
 
+
             // Fetch to temp then atomic replace
-            var tmp = localDbPath + ".download.tmp";
+            var tmp = localDbPath + $".{latest.VersionId}.tmp";
             try
             {
                 await _s3.FetchObjectVersionToFileAsync(_settings.Bucket, _settings.Key, latest.VersionId, tmp, ct).ConfigureAwait(false);
@@ -111,23 +87,20 @@ public sealed class SyncOrchestrator
             var localHashAfter = FileHash.Sha256OfFile(localDbPath);
 
             // Update manifest
-            manifest.Bucket = _settings.Bucket;
-            manifest.Key = _settings.Key;
-            manifest.VersionId = latest.VersionId;
-            manifest.Sha256 = latest.VersionId; // policy: remote sha == versionId
-            manifest.ETag = latest.ETag;
-            manifest.ContentLength = latest.ContentLength;
-            manifest.LastModifiedUtc = latest.LastModifiedUtc;
-            manifest.AppliedAtUtc = DateTimeOffset.UtcNow;
-            manifest.LocalContentSha256 = localHashAfter;
+            await _manifestStore.SaveAsync(new DbSyncManifest(
+                    ServerState: new DbSyncManifest.ServerStateInfo(
+                            Bucket: _settings.Bucket,
+                            Key: _settings.Key,
+                            VersionId: latest.VersionId,
+                            ETag: latest.ETag,
+                            Sha256: latest.ChecksumSHA256,
+                            ContentLength: latest.ContentLength,
+                            LastModifiedUtc: latest.LastModifiedUtc
+                        ),
+                    CreatedAtUtc: DateTimeOffset.UtcNow
+                ), ct).ConfigureAwait(false);
 
-            await _manifestStore.SaveAsync(manifest, ct).ConfigureAwait(false);
-
-            return new SyncResult(SyncAction.Pull, SyncOutcome.Replaced, force,
-                RemoteVersionIdBefore: latest.VersionId,
-                LocalVersionIdBefore: manifest.VersionId,
-                LocalHashBefore: localHashBefore,
-                LocalHashAfter: localHashAfter);
+            return new SyncResult(SyncAction.Pull, localExists ? SyncOutcome.Replaced : SyncOutcome.Created, force);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -138,111 +111,54 @@ public sealed class SyncOrchestrator
     /// <summary>
     /// Push from a file. Enforces head precondition unless forced.
     /// </summary>
-    public async Task<SyncResult> PushFromFileAsync(string filePath, bool force = false, CancellationToken ct = default)
+    public async Task<SyncResult> PushAsync(string localDbPath, bool force = false, CancellationToken ct = default)
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
-            {
-                var message = string.IsNullOrWhiteSpace(filePath)
-                    ? "File path is empty."
-                    : $"File not found: {filePath}";
-                return new SyncResult(SyncAction.Push, SyncOutcome.Failed, force, Message: message);
-            }
+            if (!File.Exists(localDbPath))
+                return new SyncResult(SyncAction.Push, SyncOutcome.Failed, force, Message: "Local db not found.");
 
-            var manifest = await _manifestStore.LoadAsync(ct).ConfigureAwait(false)
-                          ?? new DbSyncManifest { Bucket = _settings.Bucket, Key = _settings.Key, VersionId = string.Empty };
-
-            ObjectVersionInfo latest;
-            try
+            var manifest = await _manifestStore.LoadAsync(ct).ConfigureAwait(false);
+            if (manifest != null && FileHash.Sha256OfFile(localDbPath) == manifest.ServerState.Sha256)
+                return new SyncResult(SyncAction.Push, SyncOutcome.NoChange, force);
+            if (!force)
             {
-                latest = await _s3.GetLatestVersionAsync(_settings.Bucket, _settings.Key, ct).ConfigureAwait(false);
-            }
-            catch (DeletedObjectException)
-            {
-                return new SyncResult(SyncAction.Push, SyncOutcome.RemoteDeleted, force,
-                    Message: "Remote object is deleted or has no versions.");
-            }
-            catch (NoRemoteVersionException)
-            {
-                // Allow first publish even if manifest is empty.
-                if (manifest.IsEmpty() || force == true)
+                ObjectVersionInfo latest;
+                try
                 {
-                    var up0 = await _s3.UploadObjectAsync(_settings.Bucket, _settings.Key, filePath, ct).ConfigureAwait(false);
-                    await UpdateManifestAfterPublish(manifest, up0, filePath, ct).ConfigureAwait(false);
-                    return new SyncResult(SyncAction.Push, SyncOutcome.Published, force,
-                        RemoteVersionIdAfter: up0.VersionId, LocalHashAfter: FileHash.Sha256OfFile(filePath));
+                    latest = await _s3.GetLatestVersionAsync(_settings.Bucket, _settings.Key, ct).ConfigureAwait(false);
+                    if (manifest?.ServerState.VersionId != latest.VersionId)
+                        return new SyncResult(SyncAction.Push, SyncOutcome.Conflict_RemoteHeadMismatch, force,
+                            Message: $"Remote head {latest.VersionId} != local {manifest?.ServerState.VersionId}.");
+
+
                 }
+                catch (Exception ex) when (ex is DeletedObjectException || ex is NoRemoteVersionException)
+                {
 
-                return new SyncResult(SyncAction.Push, SyncOutcome.Conflict_RemoteHeadMismatch, force,
-                    Message: "No remote head while local manifest is not empty; force to publish.");
+                }
             }
 
-            if (!string.Equals(manifest.VersionId, latest.VersionId, StringComparison.Ordinal) && !force)
-            {
-                return new SyncResult(SyncAction.Push, SyncOutcome.Conflict_RemoteHeadMismatch, false,
-                    Message: $"Remote head {latest.VersionId} != local {manifest.VersionId}.",
-                    RemoteVersionIdBefore: latest.VersionId, LocalVersionIdBefore: manifest.VersionId,
-                    LocalHashBefore: FileHash.Sha256OfFile(filePath));
-            }
+            var uploaded = await _s3.UploadObjectAsync(_settings.Bucket, _settings.Key, localDbPath, ct).ConfigureAwait(false);
 
-            var uploaded = await _s3.UploadObjectAsync(_settings.Bucket, _settings.Key, filePath, ct).ConfigureAwait(false);
-            await UpdateManifestAfterPublish(manifest, uploaded, filePath, ct).ConfigureAwait(false);
-
-            return new SyncResult(SyncAction.Push, SyncOutcome.Published, force,
-                RemoteVersionIdBefore: latest.VersionId,
-                RemoteVersionIdAfter: uploaded.VersionId,
-                LocalHashAfter: FileHash.Sha256OfFile(filePath));
+            await _manifestStore.SaveAsync(new DbSyncManifest(
+                                ServerState: new DbSyncManifest.ServerStateInfo(
+                                        Bucket: _settings.Bucket,
+                                        Key: _settings.Key,
+                                        VersionId: uploaded.VersionId,
+                                        ETag: uploaded.ETag,
+                                        Sha256: uploaded.ChecksumSHA256,
+                                        ContentLength: uploaded.ContentLength,
+                                        LastModifiedUtc: uploaded.LastModifiedUtc
+                                    ),
+                                CreatedAtUtc: DateTimeOffset.UtcNow
+                            ), ct).ConfigureAwait(false);
+            return new SyncResult(SyncAction.Push, SyncOutcome.Published, force);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return new SyncResult(SyncAction.Push, SyncOutcome.Failed, force, Message: ex.Message);
         }
-    }
-
-    /// <summary>
-    /// Push by snapshotting the live database then publishing it. Same head precondition as PushFromFileAsync.
-    /// </summary>
-    public async Task<SyncResult> PushFromDatabaseAsync(string liveDbPath, string snapshotsDir, bool force = false, CancellationToken ct = default)
-    {
-        try
-        {
-            if (string.IsNullOrWhiteSpace(liveDbPath) || !File.Exists(liveDbPath))
-            {
-                var message = string.IsNullOrWhiteSpace(liveDbPath)
-                    ? "Db path is empty."
-                    : $"Db not found: {liveDbPath}";
-                return new SyncResult(SyncAction.Push, SyncOutcome.Failed, force, Message: message);
-            }
-            var snapshotPath = SqliteBackup.CreateSnapshot(liveDbPath, snapshotsDir, snapshotFileName: null, verifyIntegrity: false);
-            try
-            {
-                return await PushFromFileAsync(snapshotPath, force, ct).ConfigureAwait(false);
-            }
-            finally
-            {
-                TryDelete(snapshotPath);
-            }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return new SyncResult(SyncAction.Push, SyncOutcome.Failed, force, Message: ex.Message);
-        }
-    }
-
-    private async Task UpdateManifestAfterPublish(DbSyncManifest manifest, ObjectVersionInfo info, string filePath, CancellationToken ct)
-    {
-        manifest.Bucket = _settings.Bucket;
-        manifest.Key = _settings.Key;
-        manifest.VersionId = info.VersionId;
-        manifest.Sha256 = info.VersionId; // policy: remote sha == versionId
-        manifest.ETag = info.ETag;
-        manifest.ContentLength = info.ContentLength;
-        manifest.LastModifiedUtc = info.LastModifiedUtc;
-        manifest.AppliedAtUtc = DateTimeOffset.UtcNow;
-        manifest.LocalContentSha256 = FileHash.Sha256OfFile(filePath);
-
-        await _manifestStore.SaveAsync(manifest, ct).ConfigureAwait(false);
     }
 
     private static void AtomicReplace(string tempPath, string targetPath)
