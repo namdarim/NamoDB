@@ -1,4 +1,7 @@
 ﻿using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+using Namo.App.DBSync;
 using Namo.Common.Abstractions;
 
 namespace Namo.WIN.Storage;
@@ -10,8 +13,9 @@ public sealed class WinFileKeyValueStore : IKeyValueStore
 
     private sealed class Db { public Dictionary<string, string> S { get; set; } = new(StringComparer.Ordinal); }
 
-    public WinFileKeyValueStore(string manifestJsonPath)
+    public WinFileKeyValueStore(IServiceProvider provider)
     {
+        string? manifestJsonPath = provider.GetService<IOptions<DbSyncPaths>>()?.Value.ManifestPath;
         if (string.IsNullOrWhiteSpace(manifestJsonPath)) throw new ArgumentNullException(nameof(manifestJsonPath));
         _path = manifestJsonPath;
     }

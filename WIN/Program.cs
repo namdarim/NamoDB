@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Namo.App.DBSync;
 using Namo.Infrastructure.DBSync;
 using Namo.WIN.Storage;
 
@@ -26,10 +27,11 @@ namespace Namo.WIN
                 {
                     services.Configure<S3Settings>(
                          context.Configuration.GetSection(nameof(S3Settings)));
-
+                    services.Configure<DbSyncPaths>(
+                         context.Configuration.GetSection(nameof(DbSyncPaths)));
                     // your custom extension
                     services.AddDbSync<WinFileKeyValueStore>();
-
+                    services.AddSingleton<DbSyncAppService>();
                 })
                 .Build();
 

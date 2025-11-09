@@ -1,8 +1,12 @@
-﻿using Namo.Domain.DBSync;
+﻿// Namo.Infrastructure.DBSync/SyncOrchestrator.cs
+using Namo.Domain.DBSync;
 
 namespace Namo.Infrastructure.DBSync;
 
-// Orchestrates Pull/Push, now able to snapshot the live SQLite DB via SqliteConnection.BackupDatabase.
+/// <summary>
+/// Orchestrates Pull/Push. Returns status codes instead of throwing for controllable conflicts.
+/// Unexpected IO/network exceptions still surface as exceptions.
+/// </summary>
 public sealed class SyncOrchestrator
 {
     private readonly S3StorageService _s3;
@@ -16,134 +20,262 @@ public sealed class SyncOrchestrator
         _manifestStore = manifestStore ?? throw new ArgumentNullException(nameof(manifestStore));
     }
 
-    public async Task PullAsync(
+    /// <summary>
+    /// Pull latest remote version to localDbPath.
+    /// - Detects local changes via hash.
+    /// - If overwrite is needed and backupNamer != null, creates a descriptive backup (never overwrites).
+    /// - Returns a SyncResult with a clear outcome.
+    /// </summary>
+    public async Task<SyncResult> PullAsync(
         string localDbPath,
-        Func<CancellationToken, Task>? preReplaceHook = null,
+        Func<BackupNamingContext, string>? backupNamer = null,
+        bool force = false,
         CancellationToken ct = default)
     {
-        var manifest = await _manifestStore.LoadAsync(ct).ConfigureAwait(false)
-                      ?? new DbSyncManifest { Bucket = _settings.Bucket, Key = _settings.Key };
-
-        var tip = await _s3.GetLatestTipAsync(_settings.Bucket, _settings.Key, ct).ConfigureAwait(false);
-        if (tip is null)
-            throw new DeletedObjectException($"Object {_settings.Bucket}/{_settings.Key} has no versions.");
-
-        var (latestVid, latestSha, latestETag, latestLen, latestLmUtc) = tip.Value;
-
-        if (!manifest.IsEmpty() && string.Equals(manifest.VersionId, latestVid, StringComparison.Ordinal))
-            return; // no-op
-
-        if (!manifest.IsEmpty())
-        {
-            var idxLocal = await _s3.FindVersionRankAsync(_settings.Bucket, _settings.Key, manifest.VersionId, ct).ConfigureAwait(false);
-            var idxCand = await _s3.FindVersionRankAsync(_settings.Bucket, _settings.Key, latestVid, ct).ConfigureAwait(false);
-
-            if (idxLocal.HasValue && idxCand.HasValue && idxCand.Value > idxLocal.Value)
-                throw new RollbackRejectedException($"Discovered version {latestVid} is older than local {manifest.VersionId}.");
-        }
-
-        if (preReplaceHook is not null) await preReplaceHook(ct).ConfigureAwait(false);
-
-        await _s3.DownloadVersionToFileAsync(_settings.Bucket, _settings.Key, latestVid, localDbPath, ct).ConfigureAwait(false);
-
-        manifest.Bucket = _settings.Bucket;
-        manifest.Key = _settings.Key;
-        manifest.VersionId = latestVid;
-        manifest.Sha256 = latestSha;   // by policy: equals VersionId
-        manifest.ETag = latestETag;
-        manifest.ContentLength = latestLen;
-        manifest.LastModifiedUtc = latestLmUtc;
-        manifest.AppliedAtUtc = DateTimeOffset.UtcNow;
-
-        await _manifestStore.SaveAsync(manifest, ct).ConfigureAwait(false);
-    }
-
-    // Push using an already-created snapshot file (kept for flexibility).
-    public async Task PushAsync(
-        string snapshotPath,
-        IDictionary<string, string>? extraMeta = null,
-        CancellationToken ct = default)
-    {
-        var manifest = await _manifestStore.LoadAsync(ct).ConfigureAwait(false)
-                      ?? new DbSyncManifest { Bucket = _settings.Bucket, Key = _settings.Key, VersionId = string.Empty };
-
-        var tip = await _s3.GetLatestTipAsync(_settings.Bucket, _settings.Key, ct).ConfigureAwait(false);
-        if (tip is null)
-            throw new DeletedObjectException($"Object {_settings.Bucket}/{_settings.Key} has no versions.");
-
-        var remoteVid = tip.Value.VersionId;
-        if (!string.Equals(manifest.VersionId, remoteVid, StringComparison.Ordinal))
-            throw new ConflictException($"S3 latest ({remoteVid}) != local ({manifest.VersionId}). Pull first.");
-
-        var uploaded = await _s3.UploadSnapshotAsync(_settings.Bucket, _settings.Key, snapshotPath, extraMeta, ct).ConfigureAwait(false);
-
-        manifest.Bucket = _settings.Bucket;
-        manifest.Key = _settings.Key;
-        manifest.VersionId = uploaded.VersionId;
-        manifest.Sha256 = uploaded.Sha256; // equals VersionId
-        manifest.ETag = uploaded.ETag;
-        manifest.ContentLength = uploaded.ContentLength;
-        manifest.LastModifiedUtc = uploaded.LastModifiedUtc;
-        manifest.AppliedAtUtc = DateTimeOffset.UtcNow;
-
-        await _manifestStore.SaveAsync(manifest, ct).ConfigureAwait(false);
-    }
-
-    // NEW: Push directly from a live DB by creating a snapshot with SqliteConnection.BackupDatabase.
-    public async Task PushFromLiveDbAsync(
-        string liveDbPath,
-        string snapshotsDir,
-        IDictionary<string, string>? extraMeta = null,
-        CancellationToken ct = default)
-    {
-        // Concurrency precondition: remote latest must match local manifest.
-        var manifest = await _manifestStore.LoadAsync(ct).ConfigureAwait(false)
-                      ?? new DbSyncManifest { Bucket = _settings.Bucket, Key = _settings.Key, VersionId = string.Empty };
-
-        var tip = await _s3.GetLatestTipAsync(_settings.Bucket, _settings.Key, ct).ConfigureAwait(false);
-        if (tip is null)
-            throw new DeletedObjectException($"Object {_settings.Bucket}/{_settings.Key} has no versions.");
-
-        var remoteVid = tip.Value.VersionId;
-        if (!string.Equals(manifest.VersionId, remoteVid, StringComparison.Ordinal))
-            throw new ConflictException($"S3 latest ({remoteVid}) != local ({manifest.VersionId}). Pull first.");
-
-        // Build snapshot locally using SQLite backup API.
-        var snapshotPath = SqliteBackup.CreateSnapshot(liveDbPath, snapshotsDir, snapshotFileName: null, verifyIntegrity: false);
-
         try
         {
-            var uploaded = await _s3.UploadSnapshotAsync(_settings.Bucket, _settings.Key, snapshotPath, extraMeta, ct).ConfigureAwait(false);
+            var manifest = await _manifestStore.LoadAsync(ct).ConfigureAwait(false)
+                          ?? new DbSyncManifest { Bucket = _settings.Bucket, Key = _settings.Key };
 
+            ObjectVersionInfo latest;
+            try
+            {
+                latest = await _s3.GetLatestVersionAsync(_settings.Bucket, _settings.Key, ct).ConfigureAwait(false);
+            }
+            catch (DeletedObjectException)
+            {
+                return new SyncResult(SyncAction.Pull, SyncOutcome.RemoteDeleted, force,
+                    Message: "Remote object is deleted or has no versions.");
+            }
+            catch (NoRemoteVersionException)
+            {
+                return new SyncResult(SyncAction.Pull, SyncOutcome.RemoteDeleted, force,
+                    Message: "No remote versions exist.");
+            }
+
+            var fileExists = File.Exists(localDbPath);
+            var localHashBefore = fileExists ? FileHash.Sha256OfFile(localDbPath) : string.Empty;
+
+            var localModified =
+                fileExists &&
+                !string.IsNullOrEmpty(manifest.LocalContentSha256) &&
+                !string.Equals(localHashBefore, manifest.LocalContentSha256, StringComparison.OrdinalIgnoreCase);
+
+            // No-op: tip equals manifest and local unchanged
+            if (!localModified && !manifest.IsEmpty() &&
+                string.Equals(manifest.VersionId, latest.VersionId, StringComparison.Ordinal))
+            {
+                return new SyncResult(SyncAction.Pull, SyncOutcome.NoChange, force,
+                    RemoteVersionIdBefore: latest.VersionId, LocalVersionIdBefore: manifest.VersionId,
+                    LocalHashBefore: localHashBefore);
+            }
+
+            // Rollback guard: if remote is older than local policy allows
+            if (!manifest.IsEmpty())
+            {
+                var idxLocal = await _s3.GetVersionRankAsync(_settings.Bucket, _settings.Key, manifest.VersionId, ct).ConfigureAwait(false);
+                var idxCand = await _s3.GetVersionRankAsync(_settings.Bucket, _settings.Key, latest.VersionId, ct).ConfigureAwait(false);
+                if (idxLocal.HasValue && idxCand.HasValue && idxCand.Value > idxLocal.Value)
+                {
+                    return new SyncResult(SyncAction.Pull, SyncOutcome.Conflict_RollbackRejected, force,
+                        Message: $"Remote {latest.VersionId} is older than local {manifest.VersionId}.",
+                        RemoteVersionIdBefore: latest.VersionId, LocalVersionIdBefore: manifest.VersionId,
+                        LocalHashBefore: localHashBefore);
+                }
+            }
+
+            // Local changed and not forced -> conflict
+            if (localModified && !force)
+            {
+                return new SyncResult(SyncAction.Pull, SyncOutcome.Conflict_LocalChanged, false,
+                    Message: "Local content hash differs from last applied; use force to overwrite.",
+                    RemoteVersionIdBefore: latest.VersionId, LocalVersionIdBefore: manifest.VersionId,
+                    LocalHashBefore: localHashBefore);
+            }
+
+            // Prepare backup if we will overwrite and backupNamer is provided
+            if (fileExists && backupNamer is not null &&
+                (localModified || !string.Equals(manifest.VersionId, latest.VersionId, StringComparison.Ordinal)))
+            {
+                var ctxBackup = new BackupNamingContext
+                {
+                    LocalDbPath = localDbPath,
+                    LocalContentSha256 = localHashBefore,
+                    LocalVersionId = manifest.VersionId ?? string.Empty,
+                    RemoteVersionId = latest.VersionId,
+                    AppliedAtUtc = manifest.AppliedAtUtc,
+                    NowUtc = DateTimeOffset.UtcNow,
+                    Reason = "pull-overwrite"
+                };
+
+                var backupPath = backupNamer(ctxBackup);
+                if (string.IsNullOrWhiteSpace(backupPath))
+                    return new SyncResult(SyncAction.Pull, SyncOutcome.Failed, force, "Backup namer returned an empty path.");
+
+                if (File.Exists(backupPath))
+                {
+                    return new SyncResult(SyncAction.Pull, SyncOutcome.BackupAlreadyExists, force,
+                        Message: $"Backup already exists: {backupPath}",
+                        LocalBackupPath: backupPath,
+                        RemoteVersionIdBefore: latest.VersionId, LocalVersionIdBefore: manifest.VersionId,
+                        LocalHashBefore: localHashBefore);
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!);
+                File.Copy(localDbPath, backupPath, overwrite: false);
+            }
+
+            // Fetch to temp then atomic replace
+            var tmp = localDbPath + ".download.tmp";
+            try
+            {
+                await _s3.FetchObjectVersionToFileAsync(_settings.Bucket, _settings.Key, latest.VersionId, tmp, ct).ConfigureAwait(false);
+                AtomicReplace(tmp, localDbPath);
+            }
+            finally { TryDelete(tmp); }
+
+            var localHashAfter = FileHash.Sha256OfFile(localDbPath);
+
+            // Update manifest
             manifest.Bucket = _settings.Bucket;
             manifest.Key = _settings.Key;
-            manifest.VersionId = uploaded.VersionId;
-            manifest.Sha256 = uploaded.Sha256; // equals VersionId
-            manifest.ETag = uploaded.ETag;
-            manifest.ContentLength = uploaded.ContentLength;
-            manifest.LastModifiedUtc = uploaded.LastModifiedUtc;
+            manifest.VersionId = latest.VersionId;
+            manifest.Sha256 = latest.VersionId; // policy: remote sha == versionId
+            manifest.ETag = latest.ETag;
+            manifest.ContentLength = latest.ContentLength;
+            manifest.LastModifiedUtc = latest.LastModifiedUtc;
             manifest.AppliedAtUtc = DateTimeOffset.UtcNow;
+            manifest.LocalContentSha256 = localHashAfter;
 
             await _manifestStore.SaveAsync(manifest, ct).ConfigureAwait(false);
+
+            return new SyncResult(SyncAction.Pull, SyncOutcome.Replaced, force,
+                RemoteVersionIdBefore: latest.VersionId,
+                LocalVersionIdBefore: manifest.VersionId,
+                LocalHashBefore: localHashBefore,
+                LocalHashAfter: localHashAfter);
         }
-        finally
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // Best-effort cleanup of the temp snapshot.
-            TryDelete(snapshotPath);
+            return new SyncResult(SyncAction.Pull, SyncOutcome.Failed, force, Message: ex.Message);
         }
     }
 
-    // Convenience: publish from live DB, then pull to ensure local file parity.
-    public async Task PushFromLiveDbThenPullAsync(
-        string liveDbPath,
-        string snapshotsDir,
-        string localDbPath,
-        IDictionary<string, string>? extraMeta = null,
-        Func<CancellationToken, Task>? preReplaceHook = null,
-        CancellationToken ct = default)
+    /// <summary>
+    /// Push from a file. Enforces head precondition unless forced.
+    /// </summary>
+    public async Task<SyncResult> PushFromFileAsync(string filePath, bool force = false, CancellationToken ct = default)
     {
-        await PushFromLiveDbAsync(liveDbPath, snapshotsDir, extraMeta, ct).ConfigureAwait(false);
-        await PullAsync(localDbPath, preReplaceHook, ct).ConfigureAwait(false);
+        try
+        {
+            var manifest = await _manifestStore.LoadAsync(ct).ConfigureAwait(false)
+                          ?? new DbSyncManifest { Bucket = _settings.Bucket, Key = _settings.Key, VersionId = string.Empty };
+
+            ObjectVersionInfo latest;
+            try
+            {
+                latest = await _s3.GetLatestVersionAsync(_settings.Bucket, _settings.Key, ct).ConfigureAwait(false);
+            }
+            catch (DeletedObjectException)
+            {
+                return new SyncResult(SyncAction.Push, SyncOutcome.RemoteDeleted, force,
+                    Message: "Remote object is deleted or has no versions.");
+            }
+            catch (NoRemoteVersionException)
+            {
+                // Allow first publish even if manifest is empty.
+                if (manifest.IsEmpty() || force == true)
+                {
+                    var up0 = await _s3.UploadObjectAsync(_settings.Bucket, _settings.Key, filePath, ct).ConfigureAwait(false);
+                    await UpdateManifestAfterPublish(manifest, up0, filePath, ct).ConfigureAwait(false);
+                    return new SyncResult(SyncAction.Push, SyncOutcome.Published, force,
+                        RemoteVersionIdAfter: up0.VersionId, LocalHashAfter: FileHash.Sha256OfFile(filePath));
+                }
+
+                return new SyncResult(SyncAction.Push, SyncOutcome.Conflict_RemoteHeadMismatch, force,
+                    Message: "No remote head while local manifest is not empty; force to publish.");
+            }
+
+            if (!string.Equals(manifest.VersionId, latest.VersionId, StringComparison.Ordinal) && !force)
+            {
+                return new SyncResult(SyncAction.Push, SyncOutcome.Conflict_RemoteHeadMismatch, false,
+                    Message: $"Remote head {latest.VersionId} != local {manifest.VersionId}.",
+                    RemoteVersionIdBefore: latest.VersionId, LocalVersionIdBefore: manifest.VersionId,
+                    LocalHashBefore: FileHash.Sha256OfFile(filePath));
+            }
+
+            var uploaded = await _s3.UploadObjectAsync(_settings.Bucket, _settings.Key, filePath, ct).ConfigureAwait(false);
+            await UpdateManifestAfterPublish(manifest, uploaded, filePath, ct).ConfigureAwait(false);
+
+            return new SyncResult(SyncAction.Push, SyncOutcome.Published, force,
+                RemoteVersionIdBefore: latest.VersionId,
+                RemoteVersionIdAfter: uploaded.VersionId,
+                LocalHashAfter: FileHash.Sha256OfFile(filePath));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new SyncResult(SyncAction.Push, SyncOutcome.Failed, force, Message: ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Push by snapshotting the live database then publishing it. Same head precondition as PushFromFileAsync.
+    /// </summary>
+    public async Task<SyncResult> PushFromDatabaseAsync(string liveDbPath, string snapshotsDir, bool force = false, CancellationToken ct = default)
+    {
+        try
+        {
+            var snapshotPath = SqliteBackup.CreateSnapshot(liveDbPath, snapshotsDir, snapshotFileName: null, verifyIntegrity: false);
+            try
+            {
+                return await PushFromFileAsync(snapshotPath, force, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                TryDelete(snapshotPath);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new SyncResult(SyncAction.Push, SyncOutcome.Failed, force, Message: ex.Message);
+        }
+    }
+
+    private async Task UpdateManifestAfterPublish(DbSyncManifest manifest, ObjectVersionInfo info, string filePath, CancellationToken ct)
+    {
+        manifest.Bucket = _settings.Bucket;
+        manifest.Key = _settings.Key;
+        manifest.VersionId = info.VersionId;
+        manifest.Sha256 = info.VersionId; // policy: remote sha == versionId
+        manifest.ETag = info.ETag;
+        manifest.ContentLength = info.ContentLength;
+        manifest.LastModifiedUtc = info.LastModifiedUtc;
+        manifest.AppliedAtUtc = DateTimeOffset.UtcNow;
+        manifest.LocalContentSha256 = FileHash.Sha256OfFile(filePath);
+
+        await _manifestStore.SaveAsync(manifest, ct).ConfigureAwait(false);
+    }
+
+    private static void AtomicReplace(string tempPath, string targetPath)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+        if (OperatingSystem.IsWindows())
+        {
+            if (File.Exists(targetPath))
+            {
+                var backup = targetPath + ".bak";
+                try { File.Replace(tempPath, targetPath, backup, ignoreMetadataErrors: true); }
+                finally { if (File.Exists(backup)) File.Delete(backup); }
+            }
+            else
+            {
+                File.Move(tempPath, targetPath);
+            }
+        }
+        else
+        {
+            File.Move(tempPath, targetPath, overwrite: true);
+        }
     }
 
     private static void TryDelete(string path)

@@ -1,4 +1,5 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
+using Namo.App.DBSync;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -20,10 +21,20 @@ namespace Namo.WIN
             _services = services;
         }
 
-        private void button1_Click(object sender, EventArgs e)
+        private async void button1_Click(object sender, EventArgs e)
         {
-            var srv = _services.GetRequiredService<Infrastructure.DBSync.SyncOrchestrator>();
-            srv.PullAsync(@"C:\temp\namo-local.db").GetAwaiter().GetResult();
+            var srv = _services.GetRequiredService<DbSyncAppService>();
+            var res = await srv.PullAsync();
+            MessageBox.Show(this, res.Message, "Pull Result", MessageBoxButtons.OK, 
+                res.Succeeded ? MessageBoxIcon.Information : MessageBoxIcon.Error);
+        }
+
+        private async void button2_Click(object sender, EventArgs e)
+        {
+            var srv = _services.GetRequiredService<DbSyncAppService>();
+            var res = await srv.PushAsync();
+            MessageBox.Show(this, res.Message, "Push Result", MessageBoxButtons.OK,
+                res.Succeeded ? MessageBoxIcon.Information : MessageBoxIcon.Error);
         }
     }
 }

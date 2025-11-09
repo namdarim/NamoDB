@@ -18,6 +18,7 @@
                 <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="9.0.10" />
                 <ProjectReference Include="../Namo.Domain/Namo.Domain.csproj" />
                 <ProjectReference Include="../Namo.Infrastructure/Namo.Infrastructure.csproj" />
+                <ProjectReference Include="..\Namo.App\Namo.App.csproj" />
         </ItemGroup>
 
         <ItemGroup>

@@ -1,49 +1,36 @@
-﻿using Amazon;
-using Amazon.Runtime;
-using Amazon.S3;
+﻿using Amazon.S3;
 using Amazon.S3.Model;
+using Amazon.Runtime;
 using Namo.Domain.DBSync;
-using System.Security.Cryptography;
-using System.Text;
 
 namespace Namo.Infrastructure.DBSync;
 
-// Focused S3 helper for versioned GET/PUT and manifest-friendly metadata.
+/// <summary>
+/// Minimal S3 helper for versioned objects (GET/PUT). No environment policy.
+/// </summary>
 public sealed class S3StorageService : IDisposable
 {
     private readonly IAmazonS3 _s3;
 
     public S3StorageService(S3Settings settings)
     {
-        _s3 = CreateClient(settings.AccessKey, settings.SecretKey, settings.ServiceUrl, settings.ForcePathStyle);
+        _s3 = new AmazonS3Client(
+            new BasicAWSCredentials(settings.AccessKey, settings.SecretKey),
+            new AmazonS3Config { ServiceURL = settings.ServiceUrl, ForcePathStyle = settings.ForcePathStyle });
     }
 
-    private IAmazonS3 CreateClient(string accessKey, string secretKey, string serviceUrl, bool forcePathStyle)
-    {
-        var creds = new BasicAWSCredentials(accessKey, secretKey);
-        var cfg = new AmazonS3Config
-        {
-            ServiceURL = serviceUrl,
-            ForcePathStyle = forcePathStyle
-        };
-        return new AmazonS3Client(creds, cfg);
-    }
-
-
-    public async Task<(string VersionId, string Sha256, string ETag, long ContentLength, DateTimeOffset LastModifiedUtc)?>
-           GetLatestTipAsync(string bucket, string key, CancellationToken ct = default)
+    /// <summary>Get latest non-deleted version metadata. Throws if none or deleted.</summary>
+    public async Task<ObjectVersionInfo> GetLatestVersionAsync(string bucket, string key, CancellationToken ct = default)
     {
         var req = new ListVersionsRequest { BucketName = bucket, Prefix = key };
 
         do
         {
             var resp = await _s3.ListVersionsAsync(req, ct).ConfigureAwait(false);
-
-            var tip = resp.Versions.FirstOrDefault(v => v.Key == key && v.IsLatest == true);
+            var tip = resp.Versions?.FirstOrDefault(v => v.Key == key && v.IsLatest == true);
             if (tip != null)
             {
-                if (tip.IsDeleteMarker == true)
-                    throw new DeletedObjectException("object is deleted (delete-marker on top).");
+                if (tip.IsDeleteMarker == true) throw new DeletedObjectException("object has a delete-marker on top.");
 
                 var head = await _s3.GetObjectMetadataAsync(new GetObjectMetadataRequest
                 {
@@ -56,8 +43,8 @@ public sealed class S3StorageService : IDisposable
                 var len = head.ContentLength;
                 var lm = head.LastModified?.ToUniversalTime() ?? tip.LastModified?.ToUniversalTime() ?? DateTime.UtcNow;
 
-                var vid = tip.VersionId ?? throw new InvalidOperationException("VersionId missing for latest tip.");
-                return (vid, vid /* sha256 := versionId */, etag, len, new DateTimeOffset(lm, TimeSpan.Zero));
+                var vid = tip.VersionId ?? throw new InvalidOperationException("missing VersionId");
+                return new ObjectVersionInfo(vid, etag, len, new DateTimeOffset(lm, TimeSpan.Zero));
             }
 
             req.KeyMarker = resp.NextKeyMarker;
@@ -65,66 +52,60 @@ public sealed class S3StorageService : IDisposable
 
         } while (!string.IsNullOrEmpty(req.KeyMarker) || !string.IsNullOrEmpty(req.VersionIdMarker));
 
-        return null;
+        throw new NoRemoteVersionException($"no versions for {bucket}/{key}");
     }
 
-    public async Task<int?> FindVersionRankAsync(string bucket, string key, string versionId, CancellationToken ct = default)
+    public async Task<int?> GetVersionRankAsync(string bucket, string key, string versionId, CancellationToken ct = default)
     {
         var req = new ListVersionsRequest { BucketName = bucket, Prefix = key };
         var rank = 0;
-
         do
         {
             var resp = await _s3.ListVersionsAsync(req, ct).ConfigureAwait(false);
-
+            if (resp.Versions == null) break;
             foreach (var v in resp.Versions.Where(v => v.Key == key))
             {
                 if (v.IsDeleteMarker == true) continue;
                 if (v.VersionId == versionId) return rank;
                 rank++;
             }
-
             req.KeyMarker = resp.NextKeyMarker;
             req.VersionIdMarker = resp.NextVersionIdMarker;
-
-        } while (!string.IsNullOrEmpty(req.KeyMarker) || !string.IsNullOrEmpty(req.VersionIdMarker));
+        }
+        while (!string.IsNullOrEmpty(req.KeyMarker) || !string.IsNullOrEmpty(req.VersionIdMarker));
 
         return null;
     }
 
-    public async Task DownloadVersionToFileAsync(string bucket, string key, string versionId, string destPath, CancellationToken ct = default)
+    /// <summary>Fetch the exact object version and write it to the given file path (no replace, no backup).</summary>
+    public async Task FetchObjectVersionToFileAsync(string bucket, string key, string versionId, string destinationFilePath, CancellationToken ct = default)
     {
-        var tempPath = destPath + ".download.tmp";
+        Directory.CreateDirectory(Path.GetDirectoryName(destinationFilePath)!);
 
-        using (var resp = await _s3.GetObjectAsync(new GetObjectRequest
+        using var resp = await _s3.GetObjectAsync(new GetObjectRequest
         {
             BucketName = bucket,
             Key = key,
             VersionId = versionId
-        }, ct).ConfigureAwait(false))
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
-            await using var fs = File.Create(tempPath);
-            await resp.ResponseStream.CopyToAsync(fs, ct).ConfigureAwait(false);
-        }
+        }, ct).ConfigureAwait(false);
 
-        AtomicReplace(tempPath, destPath);
+        await using var fs = File.Create(destinationFilePath);
+        await resp.ResponseStream.CopyToAsync(fs, ct).ConfigureAwait(false);
     }
 
-    public async Task<(string VersionId, string Sha256, string ETag, long ContentLength, DateTimeOffset LastModifiedUtc)>
-        UploadSnapshotAsync(string bucket, string key, string filePath, IDictionary<string, string>? extraMeta, CancellationToken ct = default)
+    /// <summary>Upload a local file as the next version for the key; return its version metadata.</summary>
+    public async Task<ObjectVersionInfo> UploadObjectAsync(string bucket, string key, string filePath, CancellationToken ct = default)
     {
-        var put = new PutObjectRequest { BucketName = bucket, Key = key, FilePath = filePath };
-        if (extraMeta != null) foreach (var kv in extraMeta) put.Metadata[kv.Key] = kv.Value;
+        var resp = await _s3.PutObjectAsync(new PutObjectRequest
+        {
+            BucketName = bucket,
+            Key = key,
+            FilePath = filePath
+        }, ct).ConfigureAwait(false);
 
-        var resp = await _s3.PutObjectAsync(put, ct).ConfigureAwait(false);
         var versionId = resp.VersionId;
         if (string.IsNullOrEmpty(versionId))
-        {
-            var latest = await GetLatestTipAsync(bucket, key, ct).ConfigureAwait(false)
-                         ?? throw new InvalidOperationException("Unable to determine VersionId after upload.");
-            versionId = latest.VersionId;
-        }
+            throw new InvalidOperationException();
 
         var head = await _s3.GetObjectMetadataAsync(new GetObjectMetadataRequest
         {
@@ -137,35 +118,15 @@ public sealed class S3StorageService : IDisposable
         var len = head.ContentLength;
         var lm = head.LastModified?.ToUniversalTime() ?? DateTime.UtcNow;
 
-        return (versionId, versionId /* sha256 := versionId */, etag, len, new DateTimeOffset(lm, TimeSpan.Zero));
+        return new ObjectVersionInfo(versionId, etag, len, new DateTimeOffset(lm, TimeSpan.Zero));
     }
 
-    private static void AtomicReplace(string tempPath, string targetPath)
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
-        if (OperatingSystem.IsWindows())
-        {
-            if (File.Exists(targetPath))
-            {
-                var backup = targetPath + ".bak";
-                try { File.Replace(tempPath, targetPath, backup, ignoreMetadataErrors: true); }
-                finally { if (File.Exists(backup)) File.Delete(backup); }
-            }
-            else
-            {
-                File.Move(tempPath, targetPath);
-            }
-        }
-        else
-        {
-            File.Move(tempPath, targetPath, overwrite: true);
-        }
-    }
-
-    public void Dispose()
-    {
-        if (_s3 is IDisposable d) d.Dispose();
-    }
-
+    public void Dispose() { if (_s3 is IDisposable d) d.Dispose(); }
 }
 
+public readonly record struct ObjectVersionInfo(
+    string VersionId,
+    string ETag,
+    long ContentLength,
+    DateTimeOffset LastModifiedUtc
+);
