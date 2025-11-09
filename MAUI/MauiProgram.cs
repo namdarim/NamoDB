@@ -1,5 +1,4 @@
 ﻿using Microsoft.Extensions.Configuration;
-using Namo.MAUI.Adapters;
 
 namespace Namo.MAUI;
 
@@ -27,7 +26,7 @@ public static class MauiProgram
         builder.Configuration
             .AddEnvironmentVariables(prefix: "NAMO_");
 
-        builder.Services.AddMauiSnapshotSync();
+        //builder.Services.AddMaui();
 
         return builder.Build();
     }
