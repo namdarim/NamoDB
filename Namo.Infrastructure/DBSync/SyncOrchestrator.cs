@@ -12,12 +12,14 @@ public sealed class SyncOrchestrator
     private readonly S3StorageService _s3;
     private readonly S3Settings _settings;
     private readonly DbSyncManifestStore _manifestStore;
+    private readonly IBackupNamer _backupNamer;
 
-    public SyncOrchestrator(S3StorageService s3, S3Settings settings, DbSyncManifestStore manifestStore)
+    public SyncOrchestrator(S3StorageService s3, S3Settings settings, DbSyncManifestStore manifestStore, IBackupNamer backupNamer)
     {
         _s3 = s3 ?? throw new ArgumentNullException(nameof(s3));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _manifestStore = manifestStore ?? throw new ArgumentNullException(nameof(manifestStore));
+        _backupNamer = backupNamer ?? throw new ArgumentNullException(nameof(backupNamer));
     }
 
     /// <summary>
@@ -28,14 +30,21 @@ public sealed class SyncOrchestrator
     /// </summary>
     public async Task<SyncResult> PullAsync(
         string localDbPath,
-        Func<BackupNamingContext, string>? backupNamer = null,
         bool force = false,
         CancellationToken ct = default)
     {
         try
         {
-            var manifest = await _manifestStore.LoadAsync(ct).ConfigureAwait(false)
-                          ?? new DbSyncManifest { Bucket = _settings.Bucket, Key = _settings.Key };
+            var localChanged = false;
+            var manifest = await _manifestStore.LoadAsync(ct).ConfigureAwait(false);
+            if (File.Exists(localDbPath))
+            {
+                if (manifest == null || FileHash.Sha256OfFile(localDbPath) != manifest.ServerState.Sha256)
+                    localChanged = true;
+            }
+            if (localChanged && !force)
+                return new SyncResult(SyncAction.Pull, SyncOutcome.Conflict_LocalChanged, false,
+                       Message: "Local content hash differs from last applied; use force to overwrite.");
 
             ObjectVersionInfo latest;
             try
@@ -53,45 +62,10 @@ public sealed class SyncOrchestrator
                     Message: "No remote versions exist.");
             }
 
-            var fileExists = File.Exists(localDbPath);
-            var localHashBefore = fileExists ? FileHash.Sha256OfFile(localDbPath) : string.Empty;
+            if (manifest?.ServerState.VersionId == latest.VersionId)
+                return new SyncResult(SyncAction.Pull, SyncOutcome.NoChange, force);
 
-            var localModified =
-                fileExists &&
-                !string.IsNullOrEmpty(manifest.LocalContentSha256) &&
-                !string.Equals(localHashBefore, manifest.LocalContentSha256, StringComparison.OrdinalIgnoreCase);
-
-            // No-op: tip equals manifest and local unchanged
-            if (!localModified && !manifest.IsEmpty() &&
-                string.Equals(manifest.VersionId, latest.VersionId, StringComparison.Ordinal))
-            {
-                return new SyncResult(SyncAction.Pull, SyncOutcome.NoChange, force,
-                    RemoteVersionIdBefore: latest.VersionId, LocalVersionIdBefore: manifest.VersionId,
-                    LocalHashBefore: localHashBefore);
-            }
-
-            // Rollback guard: if remote is older than local policy allows
-            if (!manifest.IsEmpty())
-            {
-                var idxLocal = await _s3.GetVersionRankAsync(_settings.Bucket, _settings.Key, manifest.VersionId, ct).ConfigureAwait(false);
-                var idxCand = await _s3.GetVersionRankAsync(_settings.Bucket, _settings.Key, latest.VersionId, ct).ConfigureAwait(false);
-                if (idxLocal.HasValue && idxCand.HasValue && idxCand.Value > idxLocal.Value)
-                {
-                    return new SyncResult(SyncAction.Pull, SyncOutcome.Conflict_RollbackRejected, force,
-                        Message: $"Remote {latest.VersionId} is older than local {manifest.VersionId}.",
-                        RemoteVersionIdBefore: latest.VersionId, LocalVersionIdBefore: manifest.VersionId,
-                        LocalHashBefore: localHashBefore);
-                }
-            }
-
-            // Local changed and not forced -> conflict
-            if (localModified && !force)
-            {
-                return new SyncResult(SyncAction.Pull, SyncOutcome.Conflict_LocalChanged, false,
-                    Message: "Local content hash differs from last applied; use force to overwrite.",
-                    RemoteVersionIdBefore: latest.VersionId, LocalVersionIdBefore: manifest.VersionId,
-                    LocalHashBefore: localHashBefore);
-            }
+            if (localChanged)
 
             // Prepare backup if we will overwrite and backupNamer is provided
             if (fileExists && backupNamer is not null &&

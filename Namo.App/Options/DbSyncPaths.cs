@@ -1,4 +1,4 @@
-﻿namespace Namo.App.DBSync;
+﻿namespace Namo.App.Options;
 
 public sealed class DbSyncPaths
 {

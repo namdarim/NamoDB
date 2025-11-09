@@ -1,5 +1,5 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
-using Namo.App.DBSync;
+using Namo.App.Services;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;

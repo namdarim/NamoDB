@@ -1,8 +1,10 @@
 ﻿using Microsoft.Extensions.Options;
+using Namo.App.Options;
+using Namo.App.Models;
 using Namo.Domain.DBSync;
 using Namo.Infrastructure.DBSync;
 
-namespace Namo.App.DBSync;
+namespace Namo.App.Services;
 
 /// <summary>
 /// App-level facade: hides sync enums/codes and returns a flat result for UI.

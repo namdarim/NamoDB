@@ -1,7 +1,7 @@
 ﻿using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
-using Namo.App.DBSync;
+using Namo.App.Options;
 using Namo.Common.Abstractions;
 
 namespace Namo.WIN.Storage;

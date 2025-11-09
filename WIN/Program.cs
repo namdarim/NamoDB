@@ -1,7 +1,10 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Namo.App.DBSync;
+using Namo.App;
+using Namo.App.Options;
+using Namo.App.Services;
+using Namo.Infrastructure;
 using Namo.Infrastructure.DBSync;
 using Namo.WIN.Storage;
 using SQLitePCL;
@@ -52,8 +55,8 @@ namespace Namo.WIN
                     }
 
                     // your custom extension
-                    services.AddDbSync<WinFileKeyValueStore>();
-                    services.AddSingleton<DbSyncAppService>();
+                    services.AddNamoApp()
+                            .AddNamoWinEnvironment();
                 })
                 .Build();
 

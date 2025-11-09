@@ -27,11 +27,5 @@ public sealed record SyncResult(
     SyncAction Action,
     SyncOutcome Outcome,
     bool Forced,
-    string? Message = null,
-    string? LocalBackupPath = null,
-    string? LocalHashBefore = null,
-    string? LocalHashAfter = null,
-    string? LocalVersionIdBefore = null,
-    string? RemoteVersionIdBefore = null,
-    string? RemoteVersionIdAfter = null
+    string? Message = null
 );

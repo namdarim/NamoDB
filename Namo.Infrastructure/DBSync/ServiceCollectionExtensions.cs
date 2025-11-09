@@ -10,10 +10,9 @@ public static class ServiceCollectionExtensions
     /// Register DbSync with a concrete KV store type and optional S3 settings factory.
     /// If s3SettingsFactory is null, S3Settings must be provided via IOptions&lt;S3Settings&gt;.
     /// </summary>
-    public static IServiceCollection AddDbSync<TKeyValueStore>(
+    public static IServiceCollection AddDbSync(
         this IServiceCollection services,
         Func<S3Settings>? s3SettingsFactory = null)
-        where TKeyValueStore : class, Namo.Common.Abstractions.IKeyValueStore
     {
         // Provide S3Settings either from the factory or from IOptions<S3Settings>.
         services.AddSingleton(sp =>
@@ -31,9 +30,6 @@ public static class ServiceCollectionExtensions
             return fromOptions;
         });
 
-        // Key-Value store implementation (must be DI-resolvable).
-        services.AddSingleton<Namo.Common.Abstractions.IKeyValueStore, TKeyValueStore>();
-
         // Manifest repository
         services.AddSingleton(sp =>
             new DbSyncManifestStore(sp.GetRequiredService<Namo.Common.Abstractions.IKeyValueStore>(),
@@ -46,18 +42,18 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
-    /// <summary>
-    /// Convenience overload: bind S3Settings from an IConfiguration section (e.g. "DbSync:S3").
-    /// </summary>
-    public static IServiceCollection AddDbSyncFromConfig<TKeyValueStore>(
-        this IServiceCollection services,
-        IConfiguration s3Section)
-        where TKeyValueStore : class, Namo.Common.Abstractions.IKeyValueStore
-    {
-        if (s3Section is null) throw new ArgumentNullException(nameof(s3Section));
+    /////// <summary>
+    /////// Convenience overload: bind S3Settings from an IConfiguration section (e.g. "DbSync:S3").
+    /////// </summary>
+    ////public static IServiceCollection AddDbSyncFromConfig<TKeyValueStore>(
+    ////    this IServiceCollection services,
+    ////    IConfiguration s3Section)
+    ////    where TKeyValueStore : class, Namo.Common.Abstractions.IKeyValueStore
+    ////{
+    ////    if (s3Section is null) throw new ArgumentNullException(nameof(s3Section));
 
-        services.AddOptions<S3Settings>().Bind(s3Section).ValidateOnStart();
+    ////    services.AddOptions<S3Settings>().Bind(s3Section).ValidateOnStart();
 
-        return services.AddDbSync<TKeyValueStore>(s3SettingsFactory: null);
-    }
+    ////    return services.AddDbSync<TKeyValueStore>(s3SettingsFactory: null);
+    ////}
 }
