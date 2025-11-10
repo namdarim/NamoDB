@@ -1,8 +1,8 @@
 ﻿namespace Namo.Domain.DBSync;
 
 public sealed record DbSyncManifest(
-    DbSyncManifest.ServerStateInfo ServerState,
-    DateTimeOffset CreatedAtUtc
+    DbSyncManifest.ServerStateInfo? ServerState,
+    DateTimeOffset AppliedAtUtc
 )
 {
     public sealed record ServerStateInfo(

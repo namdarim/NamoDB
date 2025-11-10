@@ -23,7 +23,7 @@ public sealed class DbSyncAppService
 
     public async Task<DbSyncResult> PullAsync(bool force = false, CancellationToken ct = default)
     {
-        var r = await _sync.PullAsync(_paths.LocalDbPath, BackupNamer, force, ct);
+        var r = await _sync.PullAsync(_paths.LocalDbPath, _paths.LocalDbBackupsDir, force, ct);
         return MapToAppResult(r);
     }
 
@@ -62,21 +62,5 @@ public sealed class DbSyncAppService
             SyncOutcome.Failed => new(false, r.Message ?? "Sync failed."),
             _ => new(false, r.Message ?? "Sync failed.")
         };
-    }
-
-    private string BackupNamer(BackupNamingContext ctx)
-    {
-        // Deterministic, self-explanatory backup filename.
-        var dbName = Path.GetFileName(_paths.LocalDbPath);
-        var name =
-            $"{dbName}.bak.pull.{San(ctx.LocalVersionId)}__to__{San(ctx.RemoteVersionId)}." +
-            $"{Prefix(ctx.LocalContentSha256, 8)}.{ctx.AppliedAtUtc:yyyyMMddTHHmmssZ}.{ctx.NowUtc:yyyyMMddTHHmmssZ}.db";
-
-        var dir = Path.Combine(_paths.SnapshotDir, "backups");
-        Directory.CreateDirectory(dir);
-        return Path.Combine(dir, name);
-
-        static string San(string s) => string.IsNullOrEmpty(s) ? "none" : s.Replace(':', '-').Replace('/', '-');
-        static string Prefix(string s, int n) => string.IsNullOrEmpty(s) ? "none" : (s.Length <= n ? s : s[..n]);
     }
 }

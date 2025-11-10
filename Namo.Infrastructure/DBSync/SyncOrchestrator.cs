@@ -97,7 +97,7 @@ public sealed class SyncOrchestrator
                             ContentLength: latest.ContentLength,
                             LastModifiedUtc: latest.LastModifiedUtc
                         ),
-                    CreatedAtUtc: DateTimeOffset.UtcNow
+                    AppliedAtUtc: DateTimeOffset.UtcNow
                 ), ct).ConfigureAwait(false);
 
             return new SyncResult(SyncAction.Pull, localExists ? SyncOutcome.Replaced : SyncOutcome.Created, force);
@@ -111,7 +111,7 @@ public sealed class SyncOrchestrator
     /// <summary>
     /// Push from a file. Enforces head precondition unless forced.
     /// </summary>
-    public async Task<SyncResult> PushAsync(string localDbPath, bool force = false, CancellationToken ct = default)
+    public async Task<SyncResult> PushAsync(string localDbPath, string snapshotDir, bool force = false, CancellationToken ct = default)
     {
         try
         {
@@ -119,40 +119,47 @@ public sealed class SyncOrchestrator
                 return new SyncResult(SyncAction.Push, SyncOutcome.Failed, force, Message: "Local db not found.");
 
             var manifest = await _manifestStore.LoadAsync(ct).ConfigureAwait(false);
-            if (manifest != null && FileHash.Sha256OfFile(localDbPath) == manifest.ServerState.Sha256)
+            var localHash = FileHash.Sha256OfFile(localDbPath);
+            if (manifest != null && string.Equals(localHash, manifest.ServerState.Sha256, StringComparison.Ordinal))
                 return new SyncResult(SyncAction.Push, SyncOutcome.NoChange, force);
             if (!force)
             {
-                ObjectVersionInfo latest;
                 try
                 {
-                    latest = await _s3.GetLatestVersionAsync(_settings.Bucket, _settings.Key, ct).ConfigureAwait(false);
+                    var latest = await _s3.GetLatestVersionAsync(_settings.Bucket, _settings.Key, ct).ConfigureAwait(false);
                     if (manifest?.ServerState.VersionId != latest.VersionId)
                         return new SyncResult(SyncAction.Push, SyncOutcome.Conflict_RemoteHeadMismatch, force,
                             Message: $"Remote head {latest.VersionId} != local {manifest?.ServerState.VersionId}.");
 
 
                 }
-                catch (Exception ex) when (ex is DeletedObjectException || ex is NoRemoteVersionException)
+                catch (Exception ex) when (ex is DeletedObjectException or NoRemoteVersionException)
                 {
-
+                    // Allowed: pushing a fresh copy when remote is absent.
                 }
             }
 
-            var uploaded = await _s3.UploadObjectAsync(_settings.Bucket, _settings.Key, localDbPath, ct).ConfigureAwait(false);
-
-            await _manifestStore.SaveAsync(new DbSyncManifest(
-                                ServerState: new DbSyncManifest.ServerStateInfo(
-                                        Bucket: _settings.Bucket,
-                                        Key: _settings.Key,
-                                        VersionId: uploaded.VersionId,
-                                        ETag: uploaded.ETag,
-                                        Sha256: uploaded.ChecksumSHA256,
-                                        ContentLength: uploaded.ContentLength,
-                                        LastModifiedUtc: uploaded.LastModifiedUtc
-                                    ),
-                                CreatedAtUtc: DateTimeOffset.UtcNow
-                            ), ct).ConfigureAwait(false);
+            var snapshotPath = SqliteBackup.CreateSnapshot(localDbPath, snapshotDir, verifyIntegrity: false);
+            try
+            {
+                var uploaded = await _s3.UploadObjectAsync(_settings.Bucket, _settings.Key, snapshotPath, ct).ConfigureAwait(false);
+                await _manifestStore.SaveAsync(new DbSyncManifest(
+                                    ServerState: new DbSyncManifest.ServerStateInfo(
+                                            Bucket: _settings.Bucket,
+                                            Key: _settings.Key,
+                                            VersionId: uploaded.VersionId,
+                                            ETag: uploaded.ETag,
+                                            Sha256: uploaded.ChecksumSHA256,
+                                            ContentLength: uploaded.ContentLength,
+                                            LastModifiedUtc: uploaded.LastModifiedUtc
+                                        ),
+                                    AppliedAtUtc: DateTimeOffset.UtcNow
+                                ), ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                TryDelete(snapshotPath);
+            }
             return new SyncResult(SyncAction.Push, SyncOutcome.Published, force);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
