@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using Namo.App.Internal.DbSync;
+using Namo.App.Services;
 using Namo.Common.Abstractions;
 using Namo.Domain.DBSync;
 using Namo.Infrastructure; // assuming this namespace has AddInfrastructure()
@@ -12,9 +13,9 @@ public static class ServiceCollectionExtensions
     {
         // app-level services
         services.AddSingleton<IBackupNamer, DefaultBackupNamer>();
+        services.AddSingleton<DbSyncAppService>();
         // pull in infrastructure registrations
         services.AddInfrastructure();
-
         return services;
     }
 }

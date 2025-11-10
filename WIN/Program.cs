@@ -2,11 +2,8 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Namo.App;
-using Namo.App.Options;
-using Namo.App.Services;
-using Namo.Infrastructure;
 using Namo.Infrastructure.DBSync;
-using Namo.WIN.Storage;
+using Namo.WIN.Infrastructure;
 using SQLitePCL;
 
 namespace Namo.WIN
@@ -30,33 +27,10 @@ namespace Namo.WIN
                 })
                 .ConfigureServices((context, services) =>
                 {
-                    services.Configure<S3Settings>(
-                         context.Configuration.GetSection(nameof(S3Settings)));
-                    services.Configure<DbSyncPaths>(
-                         context.Configuration.GetSection(nameof(DbSyncPaths))).PostConfigure<DbSyncPaths>(o =>
-                         {
-                             o.LocalDbPath = ResolvePath(o.LocalDbPath);
-                             o.SnapshotDir = ResolvePath(o.SnapshotDir);
-                             if (!string.IsNullOrWhiteSpace(o.ManifestPath))
-                                 o.ManifestPath = ResolvePath(o.ManifestPath!);
-
-                             // ensure directories exist
-                             Directory.CreateDirectory(Path.GetDirectoryName(o.LocalDbPath)!);
-                             Directory.CreateDirectory(o.SnapshotDir);
-                             if (!string.IsNullOrWhiteSpace(o.ManifestPath))
-                                 Directory.CreateDirectory(Path.GetDirectoryName(o.ManifestPath!)!);
-                         });
-
-                    static string ResolvePath(string s)
-                    {
-                        var expanded = Environment.ExpandEnvironmentVariables(s ?? string.Empty);
-                        var normalized = expanded.Replace('/', Path.DirectorySeparatorChar);
-                        return Path.GetFullPath(normalized);
-                    }
-
                     // your custom extension
-                    services.AddNamoApp()
-                            .AddNamoWinEnvironment();
+                    services
+                            .AddNamoApp()
+                            .AddNamoWinEnvironment(context.Configuration);
                 })
                 .Build();
 

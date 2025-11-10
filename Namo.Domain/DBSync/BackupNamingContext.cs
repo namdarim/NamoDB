@@ -4,7 +4,7 @@
 /// Context for constructing a deterministic, self-explanatory backup file name.
 /// </summary>
 public sealed record BackupNamingContext(
-    DateTimeOffset AppliedAtUtc,
+    DateTimeOffset? AppliedAtUtc,
     string? RemoteVersionId, // latest remote tip
     string Reason// e.g., "pull-overwrite"
     );

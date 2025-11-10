@@ -4,9 +4,9 @@ using Microsoft.Extensions.Options;
 using Namo.App.Options;
 using Namo.Common.Abstractions;
 
-namespace Namo.WIN.Storage;
+namespace Namo.WIN.Infrastructure;
 
-public sealed class WinFileKeyValueStore : IKeyValueStore
+internal sealed class WinFileKeyValueStore : IKeyValueStore
 {
     private readonly string _path;
     private static readonly object _gate = new();

@@ -36,18 +36,6 @@ public sealed class SyncOrchestrator
     {
         try
         {
-            var localChanged = false;
-            var manifest = await _manifestStore.LoadAsync(ct).ConfigureAwait(false);
-            var localExists = File.Exists(localDbPath);
-            if (localExists)
-            {
-                if (manifest == null || FileHash.Sha256OfFile(localDbPath) != manifest.ServerState.Sha256)
-                    localChanged = true;
-            }
-            if (localChanged && !force)
-                return new SyncResult(SyncAction.Pull, SyncOutcome.Conflict_LocalChanged, false,
-                       Message: "Local content hash differs from last applied; use force to overwrite.");
-
             ObjectVersionInfo latest;
             try
             {
@@ -64,12 +52,24 @@ public sealed class SyncOrchestrator
                     Message: "No remote versions exist.");
             }
 
-            if (manifest?.ServerState.VersionId == latest.VersionId)
+            var localChanged = false;
+            var manifest = await _manifestStore.LoadAsync(ct).ConfigureAwait(false);
+            var localExists = File.Exists(localDbPath);
+            if (localExists)
+            {
+                if (manifest?.ServerState == null || !string.Equals(FileHash.Sha256OfFile(localDbPath), manifest?.ServerState?.Sha256, StringComparison.Ordinal))
+                    localChanged = true;
+            }
+            if (localChanged && !force)
+                return new SyncResult(SyncAction.Pull, SyncOutcome.Conflict_LocalChanged, false,
+                       Message: "Local content hash differs from last applied; use force to overwrite.");
+
+            if (manifest?.ServerState?.VersionId == latest.VersionId)
                 return new SyncResult(SyncAction.Pull, SyncOutcome.NoChange, force);
 
             if (localChanged)
             {
-                var backupName = _backupNamer.GetName(new BackupNamingContext(RemoteVersionId: manifest?.ServerState.VersionId, Reason: "pull-overwrite"));
+                var backupName = _backupNamer.GetName(new BackupNamingContext(AppliedAtUtc: manifest?.AppliedAtUtc.UtcDateTime, RemoteVersionId: manifest?.ServerState?.VersionId, Reason: "pull-overwrite"));
                 var backupPath = Path.Combine(localDbBackupsDir, backupName);
                 File.Copy(localDbPath, backupPath, overwrite: true);
             }
@@ -120,16 +120,16 @@ public sealed class SyncOrchestrator
 
             var manifest = await _manifestStore.LoadAsync(ct).ConfigureAwait(false);
             var localHash = FileHash.Sha256OfFile(localDbPath);
-            if (manifest != null && string.Equals(localHash, manifest.ServerState.Sha256, StringComparison.Ordinal))
+            if (manifest?.ServerState != null && string.Equals(localHash, manifest.ServerState.Sha256, StringComparison.Ordinal))
                 return new SyncResult(SyncAction.Push, SyncOutcome.NoChange, force);
             if (!force)
             {
                 try
                 {
                     var latest = await _s3.GetLatestVersionAsync(_settings.Bucket, _settings.Key, ct).ConfigureAwait(false);
-                    if (manifest?.ServerState.VersionId != latest.VersionId)
+                    if (manifest?.ServerState?.VersionId != latest.VersionId)
                         return new SyncResult(SyncAction.Push, SyncOutcome.Conflict_RemoteHeadMismatch, force,
-                            Message: $"Remote head {latest.VersionId} != local {manifest?.ServerState.VersionId}.");
+                            Message: $"Remote head {latest.VersionId} != local {manifest?.ServerState?.VersionId}.");
 
 
                 }

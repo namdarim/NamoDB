@@ -1,3 +1,9 @@
 ﻿namespace Namo.App.Options;
 
-public sealed record DbSyncPaths(string LocalDbPath, string LocalDbBackupsDir, string SnapshotDir, string? ManifestPath/* used by WIN file-based KV*/);
+public sealed class DbSyncPaths
+{
+    public required string LocalDbPath { get; init; }
+    public required string LocalDbBackupsDir { get; init; }
+    public required string SnapshotDir { get; init; }
+    public string? ManifestPath { get; init; } // used by WIN file-based KV
+}
