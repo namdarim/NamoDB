@@ -94,7 +94,6 @@ public sealed class S3StorageService : IDisposable
         return new ObjectVersionInfo(
             VersionId: response.VersionId,
             ETag: response.ETag,
-            ChecksumSHA256: response.ChecksumSHA256,
             ContentLength: response.ContentLength,
             LastModifiedUtc: response.LastModified?.ToUniversalTime()
                 ?? throw new InvalidOperationException("LastModified should not be null.")
@@ -110,7 +109,6 @@ public sealed class S3StorageService : IDisposable
 public readonly record struct ObjectVersionInfo(
     string VersionId,
     string ETag,
-    string ChecksumSHA256,
     long ContentLength,
     DateTimeOffset LastModifiedUtc
 );

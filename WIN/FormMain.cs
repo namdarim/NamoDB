@@ -24,7 +24,7 @@ namespace Namo.WIN
         private async void button1_Click(object sender, EventArgs e)
         {
             var srv = _services.GetRequiredService<DbSyncAppService>();
-            var res = await srv.PullAsync();
+            var res = await srv.PullAsync(true);
             MessageBox.Show(this, res.Message, "Pull Result", MessageBoxButtons.OK, 
                 res.Succeeded ? MessageBoxIcon.Information : MessageBoxIcon.Error);
         }

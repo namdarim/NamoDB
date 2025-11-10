@@ -69,7 +69,10 @@ public sealed class SyncOrchestrator
 
             if (localChanged)
             {
-                var backupName = _backupNamer.GetName(new BackupNamingContext(AppliedAtUtc: manifest?.AppliedAtUtc.UtcDateTime, RemoteVersionId: manifest?.ServerState?.VersionId, Reason: "pull-overwrite"));
+                var backupName = _backupNamer.GetName(new BackupNamingContext(
+                    AppliedAtUtc: manifest?.AppliedAtUtc.UtcDateTime ?? File.GetCreationTimeUtc(localDbPath), 
+                    RemoteVersionId: manifest?.ServerState?.VersionId, 
+                    Reason: "pull-overwrite"));
                 var backupPath = Path.Combine(localDbBackupsDir, backupName);
                 File.Copy(localDbPath, backupPath, overwrite: true);
             }
@@ -93,7 +96,7 @@ public sealed class SyncOrchestrator
                             Key: _settings.Key,
                             VersionId: latest.VersionId,
                             ETag: latest.ETag,
-                            Sha256: latest.ChecksumSHA256,
+                            Sha256: localHashAfter,
                             ContentLength: latest.ContentLength,
                             LastModifiedUtc: latest.LastModifiedUtc
                         ),
@@ -149,7 +152,7 @@ public sealed class SyncOrchestrator
                                             Key: _settings.Key,
                                             VersionId: uploaded.VersionId,
                                             ETag: uploaded.ETag,
-                                            Sha256: uploaded.ChecksumSHA256,
+                                            Sha256: FileHash.Sha256OfFile(localDbPath),
                                             ContentLength: uploaded.ContentLength,
                                             LastModifiedUtc: uploaded.LastModifiedUtc
                                         ),
